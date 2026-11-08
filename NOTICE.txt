@@ -1,0 +1,12 @@
+FathomMapper
+
+Original author: Akamiechie
+Copyright (C) 2026 Akamiechie
+
+FathomMapper is licensed under the GNU General Public License
+version 2.0. See the LICENSE.txt file for the complete license.
+
+FathomMapper includes third-party software: AutoHotkey, PCRE, and
+the OCR library by Descolada. See THIRD-PARTY-LICENSES.txt for
+their licenses and notices, and SOURCE-CODE-AVAILABILITY.txt for
+where to get the corresponding source code.

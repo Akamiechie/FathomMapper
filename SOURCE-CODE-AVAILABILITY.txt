@@ -1,0 +1,62 @@
+FATHOMMAPPER - CORRESPONDING SOURCE CODE
+========================================
+
+FathomMapper.exe is licensed under the GNU General Public License,
+version 2. See the LICENSE.txt file for the complete license, and
+THIRD-PARTY-LICENSES.txt for the licenses of included third-party
+software.
+
+
+FATHOMMAPPER SOURCE
+-------------------
+
+The FathomMapper AutoHotkey script and OCR library source are
+included in this repository under the src/ directory.
+
+The source files are:
+
+- src/FathomMapper.ahk
+- src/OCR.ahk
+
+
+AUTOHOTKEY INTERPRETER
+----------------------
+
+AutoHotkey interpreter used to build FathomMapper.exe:
+
+- Version: AutoHotkey v2.0.19
+- Upstream source tag:
+  https://github.com/AutoHotkey/AutoHotkey/tree/v2.0.19
+
+- Source archive:
+  https://github.com/AutoHotkey/AutoHotkey/archive/refs/tags/v2.0.19.zip
+
+The AutoHotkey source tag contains the source and project files
+for the v2.0.19 interpreter, including the "Self-contained" build
+configuration, which produces AutoHotkeySC.bin, the interpreter
+used for compiled scripts.
+
+Keep this exact-version source link available alongside any
+online distribution of FathomMapper.exe.
+
+
+BUILD INFORMATION
+-----------------
+
+FathomMapper.exe was compiled using Ahk2Exe and the
+AutoHotkey v2.0.19 64-bit base file.
+
+The program's HTML, CSS, and JavaScript map viewer are
+embedded in FathomMapper.ahk.
+
+The FathomMapper source files are provided so users can
+inspect, modify, and rebuild the program.
+
+
+SOURCE CODE INCLUSION
+----------------------------
+
+FathomMapper.exe contains the AutoHotkey v2.0.19 interpreter,
+which is licensed under the GNU General Public License, version 2.
+
+The complete corresponding source code for FathomMapper is included directly in the src/ directory of this distribution, satisfying the requirements of GNU GPLv2, Section 3(a).
