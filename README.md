@@ -5,7 +5,7 @@
 # FathomMapper
 Created by Akamiechie
 ## How to Download
-To download the program through GitHub go to the releases tab and select the version that you want. You should see an ahk file and an executable file. The ahk file contains the source code, and the executable is the program. Select the executable file to begin the download process. Once the file is downloaded make sure to move it to a designated folder.
+To download the program through GitHub go to the releases tab and select the version that you want. You should see an executable file, select the executable file to begin the download process. Once the file is downloaded make sure to move it to a designated folder.
 ## How to Use
 Open the executable file to start the program. When you are ready press F1 to start the mapping process. You should see some info text next to your cursor. There are 2 sections:
 * the first section contains diagnostics about your current mapping session
