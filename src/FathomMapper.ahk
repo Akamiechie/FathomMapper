@@ -47,23 +47,57 @@ hudY := A_ScreenHeight - hudHeight - 5
 mapFolder := A_ScriptDir "\FathomMaps"
 mapPath := ""
 
+autosavePath := mapFolder "\autosave.json"
+autosaveInterval := 30000
+dirty := false
+lastSave := ""
+autosaveFailures := 0
+busy := false
+mappingStarted := false
+startNote := ""
+
+segment := 0
+pendingUnpause := false
+
 OnExit(Cleanup)
 
+CheckForAutosave()
+
+if !HasMappingStarted()
+    BeginStartScreen()
+
 F1::ToggleRecording()
-F2::FinishMapping()
-F3::ResetMapping()
+F2::HandleF2()
+F3::HandleF3()
 F4::AddPin()
 
 Cleanup(*) {
+    global finished, dirty, autosavePath
+
     SetTimer(ReadCoordinates, 0)
     SetTimer(UpdateStatus, 0)
+    SetTimer(AutoSave, 0)
+    SetTimer(ShowStartScreen, 0)
+
+    if (!finished && dirty) {
+        try {
+            SaveSession(autosavePath)
+        } catch {
+        }
+    }
+
     DllCall("Winmm\timeEndPeriod", "UInt", 1)
     ToolTip()
 }
 
 ToggleRecording() {
-    global recording, finished, points
-    global rateCount, rateStart
+    global recording, finished, points, markers
+    global rateCount, rateStart, lastX, lastZ, dirty
+    global autosaveInterval, lastSave, busy, mappingStarted
+    global segment, pendingUnpause
+
+    if busy
+        return
 
     if finished {
         ToolTip "Mapping already finished. Press F3 to clear it."
@@ -73,23 +107,46 @@ ToggleRecording() {
     recording := !recording
 
     if recording {
+        mappingStarted := true
+
+        if (points.Length > 0) {
+            segment += 1
+            pendingUnpause := true
+        }
+
         rateCount := 0
         rateStart := A_TickCount
 
+        SetTimer(ShowStartScreen, 0)
         SetTimer(ReadCoordinates, 1)
         SetTimer(UpdateStatus, 250)
+        SetTimer(AutoSave, autosaveInterval)
     } else {
         SetTimer(ReadCoordinates, 0)
         SetTimer(UpdateStatus, 0)
+        SetTimer(AutoSave, 0)
 
-        ToolTip "PAUSED`nPoints collected: " points.Length
+        if pendingUnpause {
+            pendingUnpause := false
+            segment -= 1
+        } else if (lastX != "" && lastZ != "") {
+            markers.Push({x: lastX, z: lastZ, name: "Paused", kind: 1})
+            dirty := true
+        }
+
+        AutoSave()
+
+        saveLabel := (lastSave = "") ? "none yet" : lastSave
+
+        ToolTip "PAUSED`nPoints collected: " points.Length "`nLast autosave: " saveLabel
     }
 }
 
 ReadCoordinates() {
     global recording, reading
     global points, rateCount, failedReads
-    global lastX, lastZ
+    global lastX, lastZ, dirty
+    global markers, segment, pendingUnpause
     global hudX, hudY, hudWidth, hudHeight
 
     if !recording || reading
@@ -111,8 +168,14 @@ ReadCoordinates() {
         lastX := x
         lastZ := z
 
-        points.Push({x: x, z: z})
+        if pendingUnpause {
+            markers.Push({x: x, z: z, name: "Unpaused", kind: 2})
+            pendingUnpause := false
+        }
+
+        points.Push({x: x, z: z, s: segment})
         rateCount += 1
+        dirty := true
 
     } catch as err {
         failedReads += 1
@@ -125,14 +188,18 @@ AddPin() {
     global reading, lastX, lastZ
     global markers, finished
     global hudX, hudY, hudWidth, hudHeight
+    global dirty, busy
+
+    if busy
+        return
 
     if finished {
         ToolTip "Mapping already finished."
         return
     }
 
-    ; grabs the coordinates
 
+    ; grabs the coordinates
     if reading {
         x := lastX
         z := lastZ
@@ -181,7 +248,10 @@ AddPin() {
         return
     }
 
-    markers.Push({x: x, z: z, name: pinName})
+    markers.Push({x: x, z: z, name: pinName, kind: 0})
+
+    dirty := true
+    AutoSave()
 
     ToolTip "Pin added: " pinName
         . "`nX: " x " | Z: " z
@@ -201,7 +271,7 @@ EscapeJSString(value) {
 
 UpdateStatus() {
     global points, rateCount, rateStart, failedReads
-    global markers
+    global markers, lastSave, autosaveFailures
 
     now := A_TickCount
     elapsed := Max(1, now - rateStart)
@@ -211,20 +281,283 @@ UpdateStatus() {
     rateCount := 0
     rateStart := now
 
+    saveLabel := (lastSave = "") ? "waiting" : lastSave
+
+    if autosaveFailures
+        saveLabel .= " (" autosaveFailures " failed)"
+
     ToolTip "MAPPING`n"
         . "Points: " points.Length "`n"
         . "Pins: " markers.Length "`n"
         . "Read rate: " rate " points/sec`n"
         . "Failed reads: " failedReads "`n"
+        . "Autosave: " saveLabel "`n"
         . "`nF1: Pause mapping`n"
         . "F2: Finish and create HTML map`n"
         . "F3: Clear map`n"
         . "F4: Add named pin"
 }
 
+; converts the points into a JS array
+BuildPointsData(list) {
+    data := ""
+
+    for index, point in list {
+        if (index > 1)
+            data .= ","
+
+        data .= "[" . point.x . "," . point.z . "," . point.s . "]"
+    }
+
+    return data
+}
+
+; converts the pins into a JS array
+BuildMarkersData(list) {
+    data := ""
+
+    for index, marker in list {
+        if (index > 1)
+            data .= ","
+
+        data .= "["
+            . marker.x . ","
+            . marker.z . ","
+            . Chr(34)
+            . EscapeJSString(marker.name)
+            . Chr(34)
+            . "," . marker.kind
+            . "]"
+    }
+
+    return data
+}
+
+SaveSession(path) {
+    global mapFolder, points, markers
+
+    Critical "On"
+
+    try {
+        if !DirExist(mapFolder)
+            DirCreate(mapFolder)
+
+        json := '{`n'
+        json .= '  "format": "FathomMapper session",`n'
+        json .= '  "version": 2,`n'
+        json .= '  "saved": "' . FormatTime(, "yyyy-MM-dd HH:mm:ss") . '",`n'
+        json .= '  "pointFormat": "[x, z, segment]",`n'
+        json .= '  "pinFormat": "[x, z, name, kind]",`n'
+        json .= '  "points": [' . BuildPointsData(points) . '],`n'
+        json .= '  "pins": [' . BuildMarkersData(markers) . ']`n'
+        json .= '}`n'
+
+        tempPath := path . ".tmp"
+
+        if FileExist(tempPath)
+            FileDelete tempPath
+
+        file := FileOpen(tempPath, "w", "UTF-8-RAW")
+
+        if !IsObject(file)
+            throw Error("Could not create data file:`n" tempPath)
+
+        try {
+            file.Write(json)
+        } finally {
+            file.Close()
+        }
+
+        FileMove(tempPath, path, 1)
+    } finally {
+        Critical "Off"
+    }
+}
+
+LoadSession(path, &pts, &pins) {
+    pts := []
+    pins := []
+
+    try {
+        text := FileRead(path, "UTF-8")
+    } catch {
+        return false
+    }
+
+    pointsKey := InStr(text, '"points"')
+
+    if !pointsKey
+        return false
+
+    pinsKey := InStr(text, '"pins"', true, pointsKey + 1)
+
+    if !pinsKey
+        return false
+
+    pointsText := SubStr(text, pointsKey, pinsKey - pointsKey)
+    pinsText := SubStr(text, pinsKey)
+
+    pos := 1
+
+    while RegExMatch(pointsText, "\[\s*(-?\d+)\s*,\s*(-?\d+)\s*(?:,\s*(\d+)\s*)?\]", &m, pos) {
+        pts.Push({x: Integer(m[1]), z: Integer(m[2]), s: (m[3] = "") ? 0 : Integer(m[3])})
+        pos := m.Pos + m.Len
+    }
+
+    pos := 1
+
+    while RegExMatch(pinsText, '\[\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*"((?:[^"\\]|\\.)*)"\s*(?:,\s*(\d+)\s*)?\]', &m, pos) {
+        pins.Push({x: Integer(m[1]), z: Integer(m[2]), name: UnescapeJSString(m[3]), kind: (m[4] = "") ? 0 : Integer(m[4])})
+        pos := m.Pos + m.Len
+    }
+
+    return true
+}
+
+UnescapeJSString(value) {
+    result := ""
+    pos := 1
+    length := StrLen(value)
+
+    while (pos <= length) {
+        ch := SubStr(value, pos, 1)
+
+        if (ch = "\" && pos < length) {
+            next := SubStr(value, pos + 1, 1)
+
+            if (next = "u" && RegExMatch(SubStr(value, pos + 2, 4), "^[0-9A-Fa-f]{4}$")) {
+                result .= Chr(Integer("0x" . SubStr(value, pos + 2, 4)))
+                pos += 6
+                continue
+            }
+
+            if (next = "n")
+                result .= "`n"
+            else if (next = "r")
+                result .= "`r"
+            else if (next = "t")
+                result .= "`t"
+            else
+                result .= next
+
+            pos += 2
+        } else {
+            result .= ch
+            pos += 1
+        }
+    }
+
+    return result
+}
+
+AutoSave() {
+    global dirty, autosavePath, lastSave, autosaveFailures
+
+    if !dirty
+        return
+
+    dirty := false
+
+    try {
+        SaveSession(autosavePath)
+        lastSave := FormatTime(, "HH:mm:ss")
+    } catch {
+        dirty := true
+        autosaveFailures += 1
+    }
+}
+
+CheckForAutosave() {
+    global autosavePath, points, markers, dirty
+    global lastX, lastZ, busy, segment
+
+    if !FileExist(autosavePath)
+        return
+
+    busy := true
+
+    try {
+        loadedPoints := []
+        loadedMarkers := []
+
+        if !LoadSession(autosavePath, &loadedPoints, &loadedMarkers) {
+            keptAs := MoveAsideAutosave("UnreadableAutosave")
+            MsgBox("The previous autosave could not be read, so it was kept as:`n`n" keptAs, "FathomMapper", "Icon!")
+            return
+        }
+
+        if (loadedPoints.Length = 0 && loadedMarkers.Length = 0) {
+            FileDelete autosavePath
+            return
+        }
+
+        answer := MsgBox(
+            "An unsaved mapping session was found.`n`n"
+            . "Points: " loadedPoints.Length "`n"
+            . "Pins: " loadedMarkers.Length "`n"
+            . "Last saved: " FormatTime(FileGetTime(autosavePath), "yyyy-MM-dd HH:mm:ss") "`n`n"
+            . "Resume it?`n`n"
+            . "Yes: continue this session`n"
+            . "No: keep the file aside and start a new map",
+            "FathomMapper",
+            "YesNo Icon?"
+        )
+
+        if (answer = "Yes") {
+            points := loadedPoints
+            markers := loadedMarkers
+
+            if (points.Length > 0) {
+                lastX := points[points.Length].x
+                lastZ := points[points.Length].z
+                segment := points[points.Length].s
+            }
+
+            dirty := false
+
+            ToolTip "Session recovered`nPoints: " points.Length "`nPins: " markers.Length "`n`nPress F1 to continue mapping`nPress F2 to finish"
+        } else {
+            MoveAsideAutosave("UnsavedSession")
+        }
+    } finally {
+        busy := false
+    }
+}
+
+MoveAsideAutosave(prefix) {
+    global autosavePath
+
+    target := GetUniqueFilePath(prefix . "_" . FormatTime(, "yyyy-MM-dd_HH-mm-ss"), ".json")
+    FileMove(autosavePath, target)
+
+    return target
+}
+
+GetUniqueFilePath(baseName, extension, folder := "") {
+    global mapFolder
+
+    if (folder = "")
+        folder := mapFolder
+
+    path := folder . "\" . baseName . extension
+    counter := 2
+
+    while FileExist(path) {
+        path := folder . "\" . baseName . "_" . counter . extension
+        counter += 1
+    }
+
+    return path
+}
+
+DataPathFor(htmlPath) {
+    return SubStr(htmlPath, 1, -5) . ".json"
+}
+
 GetNewMapPath() {
     global mapFolder
 
+    ; creates the FathomMaps folder if needed
     if !DirExist(mapFolder)
         DirCreate(mapFolder)
 
@@ -234,8 +567,8 @@ GetNewMapPath() {
     path := mapFolder . "\" . baseName . ".html"
     counter := 2
 
-    ; add a number to the end if one with the same name already exists
-    while FileExist(path) {
+    ; add a number to the end if a map or its data file already exists
+    while FileExist(path) || FileExist(DataPathFor(path)) {
         path := mapFolder . "\" . baseName . "_" . counter . ".html"
         counter += 1
     }
@@ -243,19 +576,162 @@ GetNewMapPath() {
     return path
 }
 
+HasMappingStarted() {
+    global mappingStarted, points, markers
+
+    return mappingStarted || points.Length > 0 || markers.Length > 0
+}
+
+StartScreenText() {
+    return "Press F1 to start mapping`nPress F2 to turn a saved data file into a map`nPress F3 to close the program"
+}
+
+HandleF2() {
+    if HasMappingStarted()
+        FinishMapping()
+    else
+        RebuildMap()
+}
+
+HandleF3() {
+    global busy
+
+    if busy
+        return
+
+    if HasMappingStarted()
+        ResetMapping()
+    else
+        ExitApp
+}
+
+BeginStartScreen() {
+    ShowStartScreen()
+    SetTimer(ShowStartScreen, 50)
+}
+
+ShowStartScreen() {
+    global busy, startNote
+
+    if HasMappingStarted() {
+        SetTimer(ShowStartScreen, 0)
+        return
+    }
+
+    if busy
+        return
+
+    if WinExist("Add Map Pin ahk_pid " . ProcessExist()) {
+        ToolTip()
+        return
+    }
+
+    text := StartScreenText()
+
+    if (startNote != "")
+        text := startNote . "`n`n" . text
+
+    ToolTip(text)
+}
+
+SetStartNote(text) {
+    global startNote
+
+    startNote := text
+    SetTimer(ClearStartNote, -8000)
+}
+
+ClearStartNote() {
+    global startNote
+
+    startNote := ""
+}
+
+RebuildMap() {
+    global finished, busy, mapFolder
+
+    if busy
+        return
+
+    if finished
+        return
+
+    if HasMappingStarted()
+        return
+
+    busy := true
+
+    ClearStartNote()
+
+    try {
+        startFolder := DirExist(mapFolder) ? mapFolder : A_ScriptDir
+
+        ToolTip()
+
+        selected := FileSelect(1, startFolder, "Choose a data file to turn into a map", "Map data (*.json)")
+
+        if (selected = "")
+            return
+
+        loadedPoints := []
+        loadedMarkers := []
+
+        if !LoadSession(selected, &loadedPoints, &loadedMarkers) {
+            MsgBox("That file could not be read as a FathomMapper data file.`n`n" selected, "FathomMapper", "Icon!")
+            return
+        }
+
+        if (loadedPoints.Length = 0 && loadedMarkers.Length = 0) {
+            MsgBox("That data file does not contain any points or pins.", "FathomMapper", "Icon!")
+            return
+        }
+
+        SplitPath(selected, , &folder, , &baseName)
+        outPath := GetUniqueFilePath(baseName . "_rebuilt", ".html", folder)
+
+        ToolTip "Creating HTML map..."
+
+        WriteMapHtml(outPath, BuildPointsData(loadedPoints), BuildMarkersData(loadedMarkers))
+
+        SplitPath(outPath, &outName)
+        SetStartNote("Map rebuilt:`n" . outName)
+
+        Run('"' outPath '"')
+    } catch as err {
+        SetStartNote("REBUILD ERROR: " . err.Message)
+    } finally {
+        busy := false
+    }
+}
+
 FinishMapping() {
     global recording, finished, mapPath
+    global autosavePath, busy
+    global points, markers
+
+    if busy
+        return
 
     recording := false
 
     SetTimer(ReadCoordinates, 0)
     SetTimer(UpdateStatus, 0)
+    SetTimer(AutoSave, 0)
+
+    if (points.Length = 0 && markers.Length = 0)
+        ExitApp
 
     ToolTip "Creating HTML map..."
 
     try {
         CreateMap()
         finished := true
+
+        try {
+            if FileExist(autosavePath)
+                FileDelete autosavePath
+        } catch {
+        }
 
         Run('"' mapPath '"')
         ExitApp
@@ -269,11 +745,23 @@ ResetMapping() {
     global recording, finished, points, markers
     global rateCount, failedReads, rateStart
     global lastX, lastZ
+    global dirty, lastSave, autosaveFailures, autosavePath, busy, mappingStarted
+    global segment, pendingUnpause
+
+    if busy
+        return
 
     recording := false
     finished := false
+    mappingStarted := false
+    segment := 0
+    pendingUnpause := false
     points := []
     markers := []
+
+    dirty := false
+    lastSave := ""
+    autosaveFailures := 0
 
     lastX := ""
     lastZ := ""
@@ -284,39 +772,29 @@ ResetMapping() {
 
     SetTimer(ReadCoordinates, 0)
     SetTimer(UpdateStatus, 0)
+    SetTimer(AutoSave, 0)
 
-    ToolTip "Map cleared.`nPress F1 to start mapping."
+    try {
+        if FileExist(autosavePath)
+            FileDelete autosavePath
+    } catch {
+    }
+
+    SetStartNote("Map cleared.")
+    BeginStartScreen()
 }
 
 CreateMap() {
     global points, markers, mapPath
 
-    ; converts the points into js arrays
+    mapPath := GetNewMapPath()
 
-    pointsData := ""
+    SaveSession(DataPathFor(mapPath))
 
-    for index, point in points {
-        if (index > 1)
-            pointsData .= ","
+    WriteMapHtml(mapPath, BuildPointsData(points), BuildMarkersData(markers))
+}
 
-        pointsData .= "[" . point.x . "," . point.z . "]"
-    }
-
-    markersData := ""
-
-    for index, marker in markers {
-        if (index > 1)
-            markersData .= ","
-
-        markersData .= "["
-            . marker.x . ","
-            . marker.z . ","
-            . Chr(34)
-            . EscapeJSString(marker.name)
-            . Chr(34)
-            . "]"
-    }
-
+WriteMapHtml(path, pointsData, markersData) {
     html := "
 (
 <!DOCTYPE html>
@@ -412,6 +890,16 @@ const stats = document.getElementById("stats");
 
 let filteredPoints = [];
 
+const markerStyles = {
+    0: { fill: "#f59e0b", stroke: "#7c2d12", text: "#92400e" },
+    1: { fill: "#a855f7", stroke: "#581c87", text: "#6b21a8" },
+    2: { fill: "#06b6d4", stroke: "#164e63", text: "#0e7490" }
+};
+
+function markerStyle(marker) {
+    return markerStyles[marker[3]] || markerStyles[0];
+}
+
 let view = {
     scale: 1,
     fitScale: 1,
@@ -441,7 +929,9 @@ function filterPoints() {
 
         const distance = Math.hypot(dx, dz);
 
-        if (maxJump === 0 || distance <= maxJump) {
+        const newPath = point[2] !== last[2];
+
+        if (maxJump === 0 || newPath || distance <= maxJump) {
             result.push(point);
         }
     }
@@ -538,14 +1028,13 @@ function drawMap() {
     `);
 
     // draws the path
-
     if (filteredPoints.length > 0) {
         ctx.beginPath();
 
         for (let i = 0; i < filteredPoints.length; i++) {
             const point = filteredPoints[i];
 
-            if (i === 0)
+            if (i === 0 || point[2] !== filteredPoints[i - 1][2])
                 ctx.moveTo(point[0], point[1]);
             else
                 ctx.lineTo(point[0], point[1]);
@@ -572,15 +1061,16 @@ function drawMap() {
     }
 
     // draws pins
-
     for (const marker of rawMarkers) {
+        const style = markerStyle(marker);
+
         ctx.beginPath();
         ctx.arc(marker[0], marker[1], 6 / view.scale, 0, Math.PI * 2);
-        ctx.fillStyle = "#f59e0b";
+        ctx.fillStyle = style.fill;
         ctx.fill();
 
         ctx.lineWidth = 1.5 / view.scale;
-        ctx.strokeStyle = "#7c2d12";
+        ctx.strokeStyle = style.stroke;
         ctx.stroke();
     }
 
@@ -610,7 +1100,7 @@ function drawMap() {
         const screenX = marker[0] * view.scale + view.offsetX;
         const screenY = view.offsetY - marker[1] * view.scale;
 
-        ctx.fillStyle = "#92400e";
+        ctx.fillStyle = markerStyle(marker).text;
         ctx.fillText(marker[2], screenX + 10, screenY - 9);
     }
 }
@@ -720,19 +1210,15 @@ updateMap();
 </html>
 )"
 
-    ; inserts the recorded points
 
+    ; inserts the recorded points and pins
     html := StrReplace(html, "__POINTS__", pointsData)
     html := StrReplace(html, "__MARKERS__", markersData)
 
-    ; creates the FathomMaps folder if needed
-
-    mapPath := GetNewMapPath()
-
-    file := FileOpen(mapPath, "w", "UTF-8-RAW")
+    file := FileOpen(path, "w", "UTF-8-RAW")
 
     if !IsObject(file)
-        throw Error("Could not create HTML file:`n" mapPath)
+        throw Error("Could not create HTML file:`n" path)
 
     try {
         file.Write(html)
