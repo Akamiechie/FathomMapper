@@ -20,7 +20,6 @@ You can save maps by pressing F2. Once you save a map the program will look for 
 * the second part is in YYYY-MM-DD format
 * the third part of the name is in HH-MM-SS format
 * if there is somehow already a map with the exact same name it will add an extra number at the end
-* if 
 * the last section is the file type, which is HTML
 
 Example file name: `CoordinateMap_2026-11-07_12-00-00.html`
