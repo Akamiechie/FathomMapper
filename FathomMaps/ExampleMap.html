@@ -101,7 +101,7 @@ const coords = document.getElementById("coords");
 
 let filteredPoints = [];
 
-// Style for named pins; pause/resume pairs get their own colors.
+// Style for named pins; each pause/resume pair gets its own blue/purple shade.
 const markerStyles = {
     0: { fill: "#f59e0b", stroke: "#7c2d12", text: "#92400e" }
 };
@@ -136,12 +136,13 @@ function markerStyle(index) {
     if (pair < 0)
         return markerStyles[0];
 
-    const hue = (270 + pair * 137.508) % 360;
+    const hue = 240 + ((pair * 0.618034) % 1) * 50;
+    const light = 40 + ((pair * 0.381966) % 1) * 22;
 
     return {
-        fill: "hsl(" + hue + ", 70%, 50%)",
-        stroke: "hsl(" + hue + ", 70%, 25%)",
-        text: "hsl(" + hue + ", 70%, 30%)"
+        fill: "hsl(" + hue + ", 75%, " + light + "%)",
+        stroke: "hsl(" + hue + ", 75%, 22%)",
+        text: "hsl(" + hue + ", 75%, 30%)"
     };
 }
 
