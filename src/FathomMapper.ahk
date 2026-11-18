@@ -47,6 +47,8 @@ hudY := A_ScreenHeight - hudHeight - 5
 mapFolder := A_ScriptDir "\FathomMaps"
 mapPath := ""
 
+settingsFolder := A_ScriptDir "\FathomSettings"
+
 autosavePath := mapFolder "\autosave.json"
 autosaveInterval := 30000
 dirty := false
@@ -59,18 +61,65 @@ startNote := ""
 segment := 0
 pendingUnpause := false
 
+keybindPath := settingsFolder "\settings.ini"
+keybindActions := ["start", "rebuild", "exit", "menu", "toggle", "finish", "clear", "pin"]
+keybindGroups := Map(
+    "start", "start",
+    "rebuild", "start",
+    "exit", "start",
+    "menu", "start",
+    "toggle", "session",
+    "finish", "session",
+    "clear", "session",
+    "pin", "session"
+)
+keybindLabels := Map(
+    "start", "Start screen: start mapping",
+    "rebuild", "Start screen: turn data file into map",
+    "exit", "Start screen: close program",
+    "menu", "Start screen: change keybinds",
+    "toggle", "Mapping: pause / resume",
+    "finish", "Mapping: finish and create map",
+    "clear", "Mapping: clear map",
+    "pin", "Mapping: add named pin"
+)
+keybindDefaults := Map(
+    "start", "F1",
+    "rebuild", "F2",
+    "exit", "F3",
+    "menu", "F4",
+    "toggle", "F1",
+    "finish", "F2",
+    "clear", "F3",
+    "pin", "F4"
+)
+keybindCallbacks := Map(
+    "start", (*) => ToggleRecording(),
+    "rebuild", (*) => RebuildMap(),
+    "exit", (*) => ExitProgram(),
+    "menu", (*) => OpenKeybindMenu(),
+    "toggle", (*) => ToggleRecording(),
+    "finish", (*) => FinishMapping(),
+    "clear", (*) => ResetMapping(),
+    "pin", (*) => AddPin()
+)
+keybinds := Map()
+boundKeys := []
+keybindGui := ""
+keybindControls := Map()
+
 OnExit(Cleanup)
+
+LoadKeybinds()
+ApplyKeybinds()
 
 CheckForAutosave()
 
+; Shows the start screen if no session is loaded.
 if !HasMappingStarted()
     BeginStartScreen()
 
-F1::ToggleRecording()
-F2::HandleF2()
-F3::HandleF3()
-F4::AddPin()
-
+; Stops timers and autosaves unfinished work on exit.
 Cleanup(*) {
     global finished, dirty, autosavePath
 
@@ -90,6 +139,7 @@ Cleanup(*) {
     ToolTip()
 }
 
+; Starts or pauses recording, tracking path segments.
 ToggleRecording() {
     global recording, finished, points, markers
     global rateCount, rateStart, lastX, lastZ, dirty
@@ -100,7 +150,7 @@ ToggleRecording() {
         return
 
     if finished {
-        ToolTip "Mapping already finished. Press F3 to clear it."
+        ToolTip "Mapping already finished. Press " . KeyLabel("clear") . " to clear it."
         return
     }
 
@@ -142,6 +192,7 @@ ToggleRecording() {
     }
 }
 
+; OCRs the HUD and stores the current x/z point.
 ReadCoordinates() {
     global recording, reading
     global points, rateCount, failedReads
@@ -173,6 +224,16 @@ ReadCoordinates() {
             pendingUnpause := false
         }
 
+        count := points.Length
+
+        if (count >= 2) {
+            prev := points[count]
+            before := points[count - 1]
+
+            if (prev.s = segment && before.s = segment && prev.x = x && prev.z = z && before.x = x && before.z = z)
+                points.Pop()
+        }
+
         points.Push({x: x, z: z, s: segment})
         rateCount += 1
         dirty := true
@@ -184,6 +245,7 @@ ReadCoordinates() {
     }
 }
 
+; Reads the current position and saves it as a named pin.
 AddPin() {
     global reading, lastX, lastZ
     global markers, finished
@@ -198,8 +260,6 @@ AddPin() {
         return
     }
 
-
-    ; grabs the coordinates
     if reading {
         x := lastX
         z := lastZ
@@ -233,10 +293,14 @@ AddPin() {
         return
     }
 
+    Suspend true
+
     result := InputBox(
         "Enter a name for this location:`nX: " x " | Z: " z,
         "Add Map Pin"
     )
+
+    Suspend false
 
     if (result.Result != "OK")
         return
@@ -258,6 +322,7 @@ AddPin() {
         . "`nTotal pins: " markers.Length
 }
 
+; Escapes a string for safe embedding in JS/JSON.
 EscapeJSString(value) {
     value := StrReplace(value, "\", "\\")
     value := StrReplace(value, Chr(34), "\" . Chr(34))
@@ -269,6 +334,7 @@ EscapeJSString(value) {
     return value
 }
 
+; Refreshes the tooltip with read rate, counts and controls.
 UpdateStatus() {
     global points, rateCount, rateStart, failedReads
     global markers, lastSave, autosaveFailures
@@ -292,13 +358,13 @@ UpdateStatus() {
         . "Read rate: " rate " points/sec`n"
         . "Failed reads: " failedReads "`n"
         . "Autosave: " saveLabel "`n"
-        . "`nF1: Pause mapping`n"
-        . "F2: Finish and create HTML map`n"
-        . "F3: Clear map`n"
-        . "F4: Add named pin"
+        . "`n" . KeyLabel("toggle") . ": Pause mapping`n"
+        . KeyLabel("finish") . ": Finish and create HTML map`n"
+        . KeyLabel("clear") . ": Clear map`n"
+        . KeyLabel("pin") . ": Add named pin"
 }
 
-; converts the points into a JS array
+; Converts the points list into a JS array literal body.
 BuildPointsData(list) {
     data := ""
 
@@ -312,7 +378,7 @@ BuildPointsData(list) {
     return data
 }
 
-; converts the pins into a JS array
+; Converts the pins list into a JS array literal body.
 BuildMarkersData(list) {
     data := ""
 
@@ -333,6 +399,7 @@ BuildMarkersData(list) {
     return data
 }
 
+; Writes points and pins to a JSON file atomically.
 SaveSession(path) {
     global mapFolder, points, markers
 
@@ -374,6 +441,7 @@ SaveSession(path) {
     }
 }
 
+; Parses a session JSON file into points and pins.
 LoadSession(path, &pts, &pins) {
     pts := []
     pins := []
@@ -414,6 +482,7 @@ LoadSession(path, &pts, &pins) {
     return true
 }
 
+; Reverses EscapeJSString.
 UnescapeJSString(value) {
     result := ""
     pos := 1
@@ -450,6 +519,7 @@ UnescapeJSString(value) {
     return result
 }
 
+; Saves the session to the autosave file when changed.
 AutoSave() {
     global dirty, autosavePath, lastSave, autosaveFailures
 
@@ -467,6 +537,7 @@ AutoSave() {
     }
 }
 
+; Offers to resume an unsaved session found at startup.
 CheckForAutosave() {
     global autosavePath, points, markers, dirty
     global lastX, lastZ, busy, segment
@@ -515,7 +586,11 @@ CheckForAutosave() {
 
             dirty := false
 
-            ToolTip "Session recovered`nPoints: " points.Length "`nPins: " markers.Length "`n`nPress F1 to continue mapping`nPress F2 to finish"
+            ToolTip "Session recovered`n"
+                . "Points: " points.Length "`n"
+                . "Pins: " markers.Length "`n`n"
+                . "Press " . KeyLabel("toggle") . " to continue mapping`n"
+                . "Press " . KeyLabel("finish") . " to finish"
         } else {
             MoveAsideAutosave("UnsavedSession")
         }
@@ -524,6 +599,7 @@ CheckForAutosave() {
     }
 }
 
+; Renames the autosave file so it is kept but not reloaded.
 MoveAsideAutosave(prefix) {
     global autosavePath
 
@@ -533,6 +609,7 @@ MoveAsideAutosave(prefix) {
     return target
 }
 
+; Returns a file path that does not collide with an existing one.
 GetUniqueFilePath(baseName, extension, folder := "") {
     global mapFolder
 
@@ -550,14 +627,15 @@ GetUniqueFilePath(baseName, extension, folder := "") {
     return path
 }
 
+; Returns the JSON data path matching an HTML map path.
 DataPathFor(htmlPath) {
     return SubStr(htmlPath, 1, -5) . ".json"
 }
 
+; Builds a unique timestamped HTML map path.
 GetNewMapPath() {
     global mapFolder
 
-    ; creates the FathomMaps folder if needed
     if !DirExist(mapFolder)
         DirCreate(mapFolder)
 
@@ -567,7 +645,6 @@ GetNewMapPath() {
     path := mapFolder . "\" . baseName . ".html"
     counter := 2
 
-    ; add a number to the end if a map or its data file already exists
     while FileExist(path) || FileExist(DataPathFor(path)) {
         path := mapFolder . "\" . baseName . "_" . counter . ".html"
         counter += 1
@@ -576,40 +653,38 @@ GetNewMapPath() {
     return path
 }
 
+; True once recording began or any data exists.
 HasMappingStarted() {
     global mappingStarted, points, markers
 
     return mappingStarted || points.Length > 0 || markers.Length > 0
 }
 
+; Returns the start screen instructions.
 StartScreenText() {
-    return "Press F1 to start mapping`nPress F2 to turn a saved data file into a map`nPress F3 to close the program"
+    return "Press " . KeyLabel("start") . " to start mapping`n"
+        . "Press " . KeyLabel("rebuild") . " to turn a saved data file into a map`n"
+        . "Press " . KeyLabel("exit") . " to close the program`n"
+        . "Press " . KeyLabel("menu") . " to change keybinds"
 }
 
-HandleF2() {
-    if HasMappingStarted()
-        FinishMapping()
-    else
-        RebuildMap()
-}
-
-HandleF3() {
+; Closes the program unless a dialog is busy.
+ExitProgram() {
     global busy
 
     if busy
         return
 
-    if HasMappingStarted()
-        ResetMapping()
-    else
-        ExitApp
+    ExitApp
 }
 
+; Shows the start screen and keeps it refreshed.
 BeginStartScreen() {
     ShowStartScreen()
     SetTimer(ShowStartScreen, 50)
 }
 
+; Displays the start screen tooltip.
 ShowStartScreen() {
     global busy, startNote
 
@@ -634,6 +709,7 @@ ShowStartScreen() {
     ToolTip(text)
 }
 
+; Sets a temporary note shown on the start screen.
 SetStartNote(text) {
     global startNote
 
@@ -641,12 +717,191 @@ SetStartNote(text) {
     SetTimer(ClearStartNote, -8000)
 }
 
+; Removes the start screen note.
 ClearStartNote() {
     global startNote
 
     startNote := ""
 }
 
+; Converts a hotkey string into readable text, e.g. ^F1 becomes Ctrl+F1.
+HotkeyText(key) {
+    names := Map("^", "Ctrl+", "!", "Alt+", "+", "Shift+", "#", "Win+")
+    result := ""
+
+    while (key != "" && names.Has(SubStr(key, 1, 1))) {
+        result .= names[SubStr(key, 1, 1)]
+        key := SubStr(key, 2)
+    }
+
+    return result . key
+}
+
+; Returns the readable key currently bound to an action.
+KeyLabel(action) {
+    global keybinds
+
+    return HotkeyText(keybinds[action])
+}
+
+; Loads saved keybinds from the INI file, using defaults where missing.
+LoadKeybinds() {
+    global keybinds, keybindActions, keybindDefaults, keybindPath
+
+    keybinds := Map()
+
+    for action in keybindActions {
+        key := IniRead(keybindPath, "Keybinds", action, keybindDefaults[action])
+        keybinds[action] := (key = "") ? keybindDefaults[action] : key
+    }
+}
+
+; Writes the current keybinds to the INI file.
+SaveKeybinds() {
+    global keybinds, keybindActions, keybindPath, settingsFolder
+
+    if !DirExist(settingsFolder)
+        DirCreate(settingsFolder)
+
+    for action in keybindActions
+        IniWrite(keybinds[action], keybindPath, "Keybinds", action)
+}
+
+; True while the start screen is showing.
+InStartScreen(*) {
+    return !HasMappingStarted()
+}
+
+; True once a mapping session has begun.
+InSession(*) {
+    return HasMappingStarted()
+}
+
+; Registers each hotkey for its own screen, replacing any previous ones.
+ApplyKeybinds() {
+    global keybinds, keybindActions, keybindDefaults, keybindCallbacks, keybindGroups, boundKeys
+
+    for bound in boundKeys {
+        HotIf(bound.context)
+
+        try Hotkey(bound.name, "Off")
+    }
+
+    boundKeys := []
+
+    for action in keybindActions {
+        context := (keybindGroups[action] = "start") ? InStartScreen : InSession
+        key := keybinds[action]
+
+        HotIf(context)
+
+        try {
+            Hotkey(key, keybindCallbacks[action], "On")
+        } catch {
+            key := keybindDefaults[action]
+            keybinds[action] := key
+            Hotkey(key, keybindCallbacks[action], "On")
+        }
+
+        boundKeys.Push({context: context, name: key})
+    }
+
+    HotIf()
+}
+
+; Opens the keybind editor from the start screen.
+OpenKeybindMenu() {
+    global busy, keybinds, keybindActions, keybindLabels, keybindGui, keybindControls
+
+    if busy || HasMappingStarted()
+        return
+
+    busy := true
+
+    ToolTip()
+    Suspend true
+
+    keybindGui := Gui("+AlwaysOnTop", "FathomMapper Keybinds")
+    keybindGui.OnEvent("Close", CloseKeybindMenu)
+    keybindGui.Add("Text", "w370", "Click a box, then press the key or key combination to use. A key can repeat between the start screen and mapping, but not within one.")
+
+    keybindControls := Map()
+
+    for action in keybindActions {
+        keybindGui.Add("Text", "xm w260 h21 +0x200", keybindLabels[action])
+        keybindControls[action] := keybindGui.Add("Hotkey", "x+10 yp w130 h21", keybinds[action])
+    }
+
+    keybindGui.Add("Button", "xm w90", "Save").OnEvent("Click", SaveKeybindMenu)
+    keybindGui.Add("Button", "x+8 w120", "Reset to defaults").OnEvent("Click", ResetKeybindMenu)
+    keybindGui.Add("Button", "x+8 w90", "Cancel").OnEvent("Click", CloseKeybindMenu)
+
+    keybindGui.Show("AutoSize Center")
+}
+
+; Validates the chosen keys, then saves and applies them.
+SaveKeybindMenu(*) {
+    global keybinds, keybindActions, keybindGroups, keybindControls, keybindPath, keybindGui
+
+    keybindGui.Opt("+OwnDialogs")
+
+    newKeys := Map()
+    used := Map()
+    used.CaseSense := false
+
+    for action in keybindActions {
+        key := keybindControls[action].Value
+
+        if (key = "") {
+            MsgBox("Every action needs a key.", "FathomMapper", "Icon!")
+            return
+        }
+
+        group := keybindGroups[action]
+
+        if used.Has(group . ":" . key) {
+            where := (group = "start") ? "the start screen" : "mapping"
+            MsgBox("The key " . HotkeyText(key) . " is assigned to more than one action on " . where . ".", "FathomMapper", "Icon!")
+            return
+        }
+
+        used[group . ":" . key] := true
+        newKeys[action] := key
+    }
+
+    keybinds := newKeys
+
+    try {
+        SaveKeybinds()
+    } catch {
+        MsgBox("The keybinds could not be saved to:`n`n" keybindPath "`n`nThey will only last until the program closes.", "FathomMapper", "Icon!")
+    }
+
+    ApplyKeybinds()
+    CloseKeybindMenu()
+    SetStartNote("Keybinds saved.")
+}
+
+; Puts the default keys back into the editor boxes.
+ResetKeybindMenu(*) {
+    global keybindActions, keybindControls, keybindDefaults
+
+    for action in keybindActions
+        keybindControls[action].Value := keybindDefaults[action]
+}
+
+; Closes the keybind editor and re-enables hotkeys.
+CloseKeybindMenu(*) {
+    global busy, keybindGui
+
+    keybindGui.Destroy()
+    keybindGui := ""
+
+    Suspend false
+    busy := false
+}
+
+; Turns a chosen JSON data file into a new HTML map.
 RebuildMap() {
     global finished, busy, mapFolder
 
@@ -704,6 +959,7 @@ RebuildMap() {
     }
 }
 
+; Stops recording, creates the HTML map and exits.
 FinishMapping() {
     global recording, finished, mapPath
     global autosavePath, busy
@@ -741,6 +997,7 @@ FinishMapping() {
     }
 }
 
+; Clears all session state and the autosave file.
 ResetMapping() {
     global recording, finished, points, markers
     global rateCount, failedReads, rateStart
@@ -784,6 +1041,7 @@ ResetMapping() {
     BeginStartScreen()
 }
 
+; Saves the data file and writes the HTML map.
 CreateMap() {
     global points, markers, mapPath
 
@@ -794,6 +1052,7 @@ CreateMap() {
     WriteMapHtml(mapPath, BuildPointsData(points), BuildMarkersData(markers))
 }
 
+; Writes the interactive HTML map with the data inserted.
 WriteMapHtml(path, pointsData, markersData) {
     html := "
 (
@@ -851,6 +1110,14 @@ button:hover {
     font-size: 13px;
     color: #444;
 }
+#coords {
+    margin-left: auto;
+    min-width: 150px;
+    text-align: right;
+    font-size: 13px;
+    color: #444;
+    font-variant-numeric: tabular-nums;
+}
 #mapWrap {
     position: absolute;
     inset: 58px 0 0 0;
@@ -875,6 +1142,7 @@ button:hover {
     <button id="zoomIn">+</button>
     <button id="zoomOut">-</button>
     <button id="fit">Fit map</button>
+    <span id="coords"></span>
 </div>
 <div id="mapWrap">
     <canvas id="map"></canvas>
@@ -887,19 +1155,63 @@ const canvas = document.getElementById("map");
 const ctx = canvas.getContext("2d");
 const maxJumpInput = document.getElementById("maxJump");
 const stats = document.getElementById("stats");
+const coords = document.getElementById("coords");
 
 let filteredPoints = [];
 
+// Style for named pins; each pause/resume pair gets its own blue/purple shade.
 const markerStyles = {
-    0: { fill: "#f59e0b", stroke: "#7c2d12", text: "#92400e" },
-    1: { fill: "#a855f7", stroke: "#581c87", text: "#6b21a8" },
-    2: { fill: "#06b6d4", stroke: "#164e63", text: "#0e7490" }
+    0: { fill: "#f59e0b", stroke: "#7c2d12", text: "#92400e" }
 };
 
-function markerStyle(marker) {
-    return markerStyles[marker[3]] || markerStyles[0];
+// Numbers each pause/resume pair; pairOf holds a marker's pair or -1.
+const pairOf = rawMarkers.map(function() { return -1; });
+let pairCount = 0;
+let pairOpen = false;
+
+for (let i = 0; i < rawMarkers.length; i++) {
+    const kind = rawMarkers[i][3];
+
+    if (kind === 1) {
+        pairOf[i] = pairCount;
+        pairCount += 1;
+        pairOpen = true;
+    } else if (kind === 2) {
+        if (pairOpen) {
+            pairOf[i] = pairCount - 1;
+            pairOpen = false;
+        } else {
+            pairOf[i] = pairCount;
+            pairCount += 1;
+        }
+    }
 }
 
+// Returns the style for a marker by index.
+function markerStyle(index) {
+    const pair = pairOf[index];
+
+    if (pair < 0)
+        return markerStyles[0];
+
+    const hue = 240 + ((pair * 0.618034) % 1) * 50;
+    const light = 40 + ((pair * 0.381966) % 1) * 22;
+
+    return {
+        fill: "hsl(" + hue + ", 75%, " + light + "%)",
+        stroke: "hsl(" + hue + ", 75%, 22%)",
+        text: "hsl(" + hue + ", 75%, 30%)"
+    };
+}
+
+// Hides markers of other pairs while a pair is selected.
+function markerVisible(index) {
+    const pair = pairOf[index];
+
+    return pair < 0 || selectedPair < 0 || pair === selectedPair;
+}
+
+// Current zoom and pan state.
 let view = {
     scale: 1,
     fitScale: 1,
@@ -907,10 +1219,16 @@ let view = {
     offsetY: 0
 };
 
+let selectedPair = -1;
+let mouse = { x: 0, y: 0, inside: false };
+
 let dragging = false;
 let lastMouseX = 0;
 let lastMouseY = 0;
+let downX = 0;
+let downY = 0;
 
+// Drops points that jump farther than the max jump value.
 function filterPoints() {
     const value = Number(maxJumpInput.value);
     const maxJump = Number.isFinite(value) ? Math.max(0, value) : 0;
@@ -939,6 +1257,7 @@ function filterPoints() {
     return result;
 }
 
+// Refilters points, updates stats and refits the view.
 function updateMap() {
     filteredPoints = filterPoints();
 
@@ -953,6 +1272,7 @@ function updateMap() {
     fitMap();
 }
 
+// Matches the canvas resolution to its display size.
 function resizeCanvas() {
     const rect = canvas.getBoundingClientRect();
     const dpr = window.devicePixelRatio || 1;
@@ -963,6 +1283,7 @@ function resizeCanvas() {
     fitMap();
 }
 
+// Scales and centers the view to fit all points and pins.
 function fitMap() {
     const allPoints = filteredPoints.concat(
         rawMarkers.map(marker => [marker[0], marker[1]])
@@ -1008,7 +1329,10 @@ function fitMap() {
     drawMap();
 }
 
+// Draws the axes, path, pins and labels.
 function drawMap() {
+    updateCoords();
+
     const rect = canvas.getBoundingClientRect();
     const dpr = window.devicePixelRatio || 1;
 
@@ -1027,7 +1351,20 @@ function drawMap() {
         dpr * view.offsetY
     `);
 
-    // draws the path
+    const worldLeft = -view.offsetX / view.scale;
+    const worldRight = (rect.width - view.offsetX) / view.scale;
+    const worldTop = view.offsetY / view.scale;
+    const worldBottom = (view.offsetY - rect.height) / view.scale;
+
+    ctx.beginPath();
+    ctx.moveTo(worldLeft, 0);
+    ctx.lineTo(worldRight, 0);
+    ctx.moveTo(0, worldBottom);
+    ctx.lineTo(0, worldTop);
+    ctx.strokeStyle = "#9ca3af";
+    ctx.lineWidth = 1.5 / view.scale;
+    ctx.stroke();
+
     if (filteredPoints.length > 0) {
         ctx.beginPath();
 
@@ -1060,12 +1397,21 @@ function drawMap() {
         ctx.fill();
     }
 
-    // draws pins
-    for (const marker of rawMarkers) {
-        const style = markerStyle(marker);
+    for (let i = 0; i < rawMarkers.length; i++) {
+        if (!markerVisible(i))
+            continue;
+
+        const marker = rawMarkers[i];
+        const style = markerStyle(i);
+        const radius = 6 / view.scale;
 
         ctx.beginPath();
-        ctx.arc(marker[0], marker[1], 6 / view.scale, 0, Math.PI * 2);
+
+        if (marker[3] === 1)
+            ctx.rect(marker[0] - radius, marker[1] - radius, radius * 2, radius * 2);
+        else
+            ctx.arc(marker[0], marker[1], radius, 0, Math.PI * 2);
+
         ctx.fillStyle = style.fill;
         ctx.fill();
 
@@ -1096,15 +1442,55 @@ function drawMap() {
         `);
     }
 
-    for (const marker of rawMarkers) {
+    for (let i = 0; i < rawMarkers.length; i++) {
+        if (!markerVisible(i))
+            continue;
+
+        const marker = rawMarkers[i];
         const screenX = marker[0] * view.scale + view.offsetX;
         const screenY = view.offsetY - marker[1] * view.scale;
 
-        ctx.fillStyle = markerStyle(marker).text;
+        ctx.fillStyle = markerStyle(i).text;
         ctx.fillText(marker[2], screenX + 10, screenY - 9);
     }
 }
 
+// Returns the pair of the nearest visible pause/resume marker to a screen position, or -1.
+function pickPair(x, y) {
+    let best = -1;
+    let bestDistance = 12;
+
+    for (let i = 0; i < rawMarkers.length; i++) {
+        if (pairOf[i] < 0 || !markerVisible(i))
+            continue;
+
+        const screenX = rawMarkers[i][0] * view.scale + view.offsetX;
+        const screenY = view.offsetY - rawMarkers[i][1] * view.scale;
+        const distance = Math.hypot(screenX - x, screenY - y);
+
+        if (distance < bestDistance) {
+            best = pairOf[i];
+            bestDistance = distance;
+        }
+    }
+
+    return best;
+}
+
+// Shows the map x/z under the mouse.
+function updateCoords() {
+    if (!mouse.inside) {
+        coords.textContent = "";
+        return;
+    }
+
+    const x = Math.round((mouse.x - view.offsetX) / view.scale);
+    const z = Math.round((view.offsetY - mouse.y) / view.scale);
+
+    coords.textContent = "X: " + x + "   Z: " + z;
+}
+
+// Zooms around a screen position.
 function zoomAt(x, y, factor) {
     const worldX = (x - view.offsetX) / view.scale;
     const worldZ = (view.offsetY - y) / view.scale;
@@ -1121,6 +1507,7 @@ function zoomAt(x, y, factor) {
     drawMap();
 }
 
+// Zooms with the mouse wheel.
 canvas.addEventListener("wheel", function(event) {
     event.preventDefault();
 
@@ -1131,19 +1518,33 @@ canvas.addEventListener("wheel", function(event) {
     zoomAt(x, y, event.deltaY < 0 ? 1.2 : 1 / 1.2);
 }, { passive: false });
 
+// Starts a drag-pan.
 canvas.addEventListener("pointerdown", function(event) {
     dragging = true;
 
     lastMouseX = event.clientX;
     lastMouseY = event.clientY;
+    downX = event.clientX;
+    downY = event.clientY;
 
+    canvas.style.cursor = "";
     canvas.classList.add("dragging");
     canvas.setPointerCapture(event.pointerId);
 });
 
+// Tracks the cursor for the coordinate readout and pans while dragging.
 canvas.addEventListener("pointermove", function(event) {
-    if (!dragging)
+    const rect = canvas.getBoundingClientRect();
+
+    mouse.x = event.clientX - rect.left;
+    mouse.y = event.clientY - rect.top;
+    mouse.inside = true;
+
+    if (!dragging) {
+        canvas.style.cursor = pickPair(mouse.x, mouse.y) >= 0 ? "pointer" : "";
+        updateCoords();
         return;
+    }
 
     const dx = event.clientX - lastMouseX;
     const dy = event.clientY - lastMouseY;
@@ -1157,14 +1558,36 @@ canvas.addEventListener("pointermove", function(event) {
     drawMap();
 });
 
+// Ends a drag-pan.
 function stopDragging() {
     dragging = false;
     canvas.classList.remove("dragging");
 }
 
-canvas.addEventListener("pointerup", stopDragging);
+// Ends a drag-pan; a click without movement selects a pair, or deselects when it hits none.
+canvas.addEventListener("pointerup", function(event) {
+    const moved = Math.hypot(event.clientX - downX, event.clientY - downY);
+
+    stopDragging();
+
+    if (moved > 4)
+        return;
+
+    const rect = canvas.getBoundingClientRect();
+
+    selectedPair = pickPair(event.clientX - rect.left, event.clientY - rect.top);
+    drawMap();
+});
+
 canvas.addEventListener("pointercancel", stopDragging);
 
+// Clears the coordinate readout when the cursor leaves the map.
+canvas.addEventListener("pointerleave", function() {
+    mouse.inside = false;
+    updateCoords();
+});
+
+// Zooms in on double-click.
 canvas.addEventListener("dblclick", function(event) {
     const rect = canvas.getBoundingClientRect();
 
@@ -1175,10 +1598,12 @@ canvas.addEventListener("dblclick", function(event) {
     `);
 });
 
+// Zoom in button.
 document.getElementById("zoomIn").addEventListener("click", function() {
     zoomAt(canvas.clientWidth / 2, canvas.clientHeight / 2, 1.5);
 });
 
+// Zoom out button.
 document.getElementById("zoomOut").addEventListener("click", function() {
     zoomAt(canvas.clientWidth / 2, canvas.clientHeight / 2, 1 / 1.5);
 });
@@ -1189,6 +1614,7 @@ maxJumpInput.addEventListener("input", updateMap);
 
 window.addEventListener("resize", resizeCanvas);
 
+// Keyboard zoom (+/-) and fit (0).
 window.addEventListener("keydown", function(event) {
     if (document.activeElement === maxJumpInput)
         return;
@@ -1210,8 +1636,6 @@ updateMap();
 </html>
 )"
 
-
-    ; inserts the recorded points and pins
     html := StrReplace(html, "__POINTS__", pointsData)
     html := StrReplace(html, "__MARKERS__", markersData)
 
